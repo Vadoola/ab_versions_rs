@@ -4,10 +4,6 @@
 //! Provides the ability to check if the file is locked, or if an MER is marked as never restore
 //! If the file is locked or marked as never restore this can be cleared so the file can be opened
 
-//TODO: Finish putting in comments
-//TODO: Add some Py03 bindings? Should be a quick easy way to try out PyO3 since the interface is minimal
-//TODO: The doc tests seem to fail on the code I have in the comments, figure out the correct format for this
-
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
 
