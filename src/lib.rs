@@ -44,6 +44,8 @@ impl Display for FileVersion {
     }
 }
 
+
+
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
 /// Returns a `FactoryTalk` View File Version for the file passed into it.
 ///
@@ -54,7 +56,8 @@ impl Display for FileVersion {
 /// # Examples
 ///
 /// ```
-/// let file_version = get_version(&path_to_file)?;
+/// use ab_versions::get_version;
+/// let file_version = get_version(&path_to_file).unwrap();
 /// ```
 ///
 /// # Errors
@@ -99,14 +102,15 @@ pub fn get_version<P: AsRef<Path>>(filename: &P) -> Result<FileVersion, FtvFileE
 /// # Examples
 ///
 /// ```
-/// let protected = is_protected(&path_to_file)?;
+/// use ab_versions::is_protected;
+/// let protected = is_protected(&path_to_file).unwrap();
 /// ```
 ///
 /// # Errors
 ///
 /// Will return `Err`  if there is an error trying to access the file,
 // or the file is invalid.
-pub fn is_protected(path: &Path) -> Result<bool, FtvFileError> {
+pub fn is_protected<P: AsRef<Path>>(path: &P) -> Result<bool, FtvFileError> {
     let mut file = cfb::open(path)?;
 
     let mut prot_stream = file.open_stream("/FILE_PROTECTION")?;
@@ -139,14 +143,15 @@ pub fn is_protected(path: &Path) -> Result<bool, FtvFileError> {
 /// # Examples
 ///
 /// ```
-/// strip_protection(&path_to_file)?;
+/// use ab_versions::strip_protection;
+/// strip_protection(&path_to_file).unwrap();
 /// ```
 ///
 /// # Errors
 ///
 /// Will return `Err`  if there is an error trying to access the file,
 // or the file is invalid.
-pub fn strip_protection<T: AsRef<std::path::Path>>(path: T) -> Result<(), FtvFileError> {
+pub fn strip_protection<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
     // Note from what I recall of my earlier testing, removing the stream "/FILE_PROTECTION"
     // or setting it to a single byte of 0, or 7 bytes of 0, also removed the protection and
     // caused no problems that I could tell. To err on the side of caution, it seemed safter
@@ -247,14 +252,14 @@ mod tests {
 
                 match state {
                     FileState::Unlocked => {
-                        assert!(!is_protected(entry.path()).unwrap());
+                        assert!(!is_protected(&entry.path()).unwrap());
                     }
                     FileState::Locked | FileState::Never => {
-                        assert!(is_protected(entry.path()).unwrap()); // File should return locked
+                        assert!(is_protected(&entry.path()).unwrap()); // File should return locked
 
                         strip_protection(entry.path()).unwrap();
 
-                        assert!(!is_protected(entry.path()).unwrap()); // File should return unlocked after we try to unlock it
+                        assert!(!is_protected(&entry.path()).unwrap()); // File should return unlocked after we try to unlock it
                     }
                 }
             });

@@ -1,13 +1,13 @@
 [package]
-name = "ab_version_lib"
+name = "ab_versions"
 version = "0.8.0"
 authors = ["Carl J. Geib"]
-edition = "2018"
+edition = "2021"
+
 
 [dependencies]
 cfb = "0.8"
 thiserror = "1.0.20"
-
 
 
 [dev-dependencies]
