@@ -10,6 +10,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::{fmt, fmt::Display};
+use rayon::prelude::*;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -51,7 +52,7 @@ impl Display for FileVersion {
 ///
 /// # Arguments
 ///
-/// * `path` - A path to the file to be checked
+/// * `filename` - A path to the file to be checked
 ///
 /// # Examples
 ///
@@ -90,6 +91,35 @@ pub fn get_version<P: AsRef<Path>>(filename: &P) -> Result<FileVersion, FtvFileE
         Err(FTypeError::InvalidVersion.into())
     }
 }
+
+// https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
+/// Returns a `FactoryTalk` View File Version for the file passed into it.
+///
+/// # Arguments
+///
+/// * `files` - A slice of paths to the files to be checked
+///
+/// # Examples
+///
+/// ```
+/// use ab_versions::get_versions;
+/// let file_version = get_versions(&paths_to_files).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// Will return `Err`  if there is an error trying to access the file,
+// or the file is invalid.
+//this parrallel version is mainly for the python bindings to take advantage
+//or the parrallelization
+pub fn get_versions<P>(files: &[P]) -> Vec<Result<FileVersion, FtvFileError>>
+    where P: AsRef<Path> + Sync
+{
+    files.as_parallel_slice().par_iter().map(|file| -> Result<FileVersion, FtvFileError> {
+        get_version(file)
+    }).collect()
+}
+
 
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
 /// Returns true/false if a `FactoryTalk` View file (APA or MER) is protected.
@@ -133,6 +163,35 @@ pub fn is_protected<P: AsRef<Path>>(path: &P) -> Result<bool, FtvFileError> {
 }
 
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
+/// Returns true/false if a `FactoryTalk` View file (APA or MER) is protected.
+/// Protected could mean password protected, or locked and set to "Never restore" for an MER
+///
+/// # Arguments
+///
+/// * `files` - A slice of paths to the files to be checked
+///
+/// # Examples
+///
+/// ```
+/// use ab_versions::are_protected;
+/// let protected = are_protected(&paths_to_files).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// Will return `Err`  if there is an error trying to access the file,
+// or the file is invalid.
+//this parrallel version is mainly for the python bindings to take advantage
+//or the parrallelization
+pub fn are_protected<P>(files: &[P]) -> Vec<Result<bool, FtvFileError>>
+    where P: AsRef<Path> + Sync
+{
+    files.as_parallel_slice().par_iter().map(|file| -> Result<bool, FtvFileError> {
+        is_protected(file)
+    }).collect()
+}
+
+// https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
 /// Strips the password protection or "Never Convert" setting of an `FactoryTalk` View
 /// MER or APA file
 ///
@@ -163,12 +222,77 @@ pub fn strip_protection<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
     // MER Version 5 which doesn't give you a choice and is always "Never Convert", and it always seems
     // to work
 
-    let mut file = cfb::open_rw(path)?;
-    let mut stream = file.open_stream("/FILE_PROTECTION")?;
-    stream.set_len(7)?;
-    stream.write_all(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00])?;
+    //Ok so I never had access to a file with version lower than 5, but my research told me that they didn't contain
+    //the info to be restored to a project file and even this method of stripping the "File Protection"
+    //wouldn't work. I finally got some v4 files (although I can't include them in the test suite)
+    //and they actually do seem to have the information to convert them, but the process is slightly different
+    //First I need to CREATE the FILE_PROTECTION stream, and set it to an unlocked value
+    //then I need to modify the VERSION_INFORMATION to look like a newer version (I'll use v5.10)
+    //no clue if this actually works on anything < v4 since I have nothing to test against
+
+
+    let mut file = cfb::open_rw(&path)?;
+
+    let version = get_version(&path)?;
+
+    if version.major_rev < 5 {
+        //if version < 5 use other method, to create FILE_PROTECTION
+        //and set the file_version to 5.10
+        //wonder if I should be checking for a .med stream to verify it's an MER here?
+        let mut fp_stream = file.create_new_stream("/FILE_PROTECTION")?;
+        fp_stream.set_len(7)?;
+        fp_stream.write_all(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00])?;
+
+        let mut ver_stream = file.open_stream("/VERSION_INFORMATION")?;
+        ver_stream.write_all(&[0x03, 0x05, 0x0A])?;
+    } else {
+        //if version >= 5 use normal method just stip protection
+        let mut stream = file.open_stream("/FILE_PROTECTION")?;
+        stream.set_len(7)?;
+        stream.write_all(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00])?;
+    }
 
     Ok(())
+}
+
+// https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
+/// Strips the password protection or "Never Convert" setting of an `FactoryTalk` View
+/// MER or APA file
+///
+/// # Arguments
+///
+/// * `files` - A slice of paths to the files to be checked
+///
+/// # Examples
+///
+/// ```
+/// use ab_versions::strip_protections;
+/// strip_protection(&paths_to_files).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// Will return `Err`  if there is an error trying to access the file,
+// or the file is invalid.
+//this parrallel version is mainly for the python bindings to take advantage
+//or the parrallelization
+pub fn strip_protections<P>(files: &[P]) -> Result<(), FtvFileError>
+    where P: AsRef<Path> + Sync
+{
+    // Note from what I recall of my earlier testing, removing the stream "/FILE_PROTECTION"
+    // or setting it to a single byte of 0, or 7 bytes of 0, also removed the protection and
+    // caused no problems that I could tell. To err on the side of caution, it seemed safter
+    //to leave the "/FILE_PROTECTION" stream in place and set it's byte to the 7 byte pattern
+    //that seems to be used for all unlocked files.
+
+    // Also of note if an MER is set to "Never Convert" stripping the protection this way will work
+    // and allows the MER to be restored. I've tested this on MERs from version 12 all the way down to
+    // MER Version 5 which doesn't give you a choice and is always "Never Convert", and it always seems
+    // to work
+
+    files.as_parallel_slice().par_iter().map(|file| -> Result<(), FtvFileError> {
+        strip_protection(file)
+    }).collect()
 }
 
 #[cfg(test)]
