@@ -45,6 +45,16 @@ impl Display for FileVersion {
     }
 }
 
+impl FileVersion {
+    pub fn is_old(&self) -> bool {
+        self.major_rev < 5
+    }
+
+    pub fn is_restorable(&self) -> bool {
+        self.major_rev >= 4
+    }
+}
+
 
 
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
@@ -245,6 +255,7 @@ pub fn strip_protection<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
 
         let mut ver_stream = file.open_stream("/VERSION_INFORMATION")?;
         ver_stream.write_all(&[0x03, 0x05, 0x0A])?;
+
     } else {
         //if version >= 5 use normal method just stip protection
         let mut stream = file.open_stream("/FILE_PROTECTION")?;
@@ -303,6 +314,8 @@ mod tests {
         combinator::map_res,
         IResult,
     };
+
+    use crate::strip_protection;
     enum FileState {
         Unlocked,
         Locked,
