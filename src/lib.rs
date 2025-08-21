@@ -39,6 +39,7 @@ pub enum FtvFileError {
 pub enum MeFiletype {
     Apa,
     Mer,
+    Other,
 }
 
 /// Holds the version number of the file.
@@ -369,8 +370,26 @@ pub fn fix_crc<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
     Ok(())
 }
 
-pub fn file_type(file: &CompoundFile<File>) -> MeFiletype {
-    todo!()
+pub fn file_type<P: AsRef<Path>>(path: P) -> MeFiletype {
+    // What's the best way to determine if it's an APA or MER?
+    // I could simply look at the file extension. The Application
+    // Manager will ensure that it has the right extension since that's
+    // historically important on Windows.
+    // I'll go with the file extension for now, but it's possible
+    // if I could do something else in the future like look for the .med
+    // or look for the HMIServer folder, or read what's in the
+    // PRODUCT_VERSION_INFORMATION stream (if I can interpret it)
+    if let Some(ext) = path.as_ref().extension() {
+        if let Some(ext) = ext.to_ascii_lowercase().to_str() {
+            return match ext {
+                "apa" => MeFiletype::Apa,
+                "mer" => MeFiletype::Mer,
+                _ => MeFiletype::Other,
+            };
+        }
+    }
+
+    MeFiletype::Other
 }
 
 #[cfg(test)]
