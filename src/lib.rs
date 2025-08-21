@@ -7,10 +7,14 @@
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
 
+use cfb::CompoundFile;
+use crc32fast::Hasher;
+use rayon::prelude::*;
+use std::fs::File;
 use std::io::{Read, Write};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::{fmt, fmt::Display};
-use rayon::prelude::*;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -19,6 +23,8 @@ pub enum FTypeError {
     NoVersion,
     #[error("Version information appears to be invalid")]
     InvalidVersion,
+    #[error("No Password protection file was found")]
+    NoProtFile,
 }
 
 #[derive(Error, Debug)]
@@ -28,6 +34,11 @@ pub enum FtvFileError {
 
     #[error("The file does not appear to be a valid FactoryTalk View ME File: {0:?}")]
     FileTypeError(#[from] FTypeError),
+}
+
+pub enum MeFiletype {
+    Apa,
+    Mer,
 }
 
 /// Holds the version number of the file.
@@ -46,16 +57,16 @@ impl Display for FileVersion {
 }
 
 impl FileVersion {
+    #[must_use]
     pub fn is_old(&self) -> bool {
         self.major_rev < 5
     }
 
+    #[must_use]
     pub fn is_restorable(&self) -> bool {
         self.major_rev >= 4
     }
 }
-
-
 
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
 /// Returns a `FactoryTalk` View File Version for the file passed into it.
@@ -123,13 +134,15 @@ pub fn get_version<P: AsRef<Path>>(filename: &P) -> Result<FileVersion, FtvFileE
 //this parrallel version is mainly for the python bindings to take advantage
 //or the parrallelization
 pub fn get_versions<P>(files: &[P]) -> Vec<Result<FileVersion, FtvFileError>>
-    where P: AsRef<Path> + Sync
+where
+    P: AsRef<Path> + Sync,
 {
-    files.as_parallel_slice().par_iter().map(|file| -> Result<FileVersion, FtvFileError> {
-        get_version(file)
-    }).collect()
+    files
+        .as_parallel_slice()
+        .par_iter()
+        .map(|file| -> Result<FileVersion, FtvFileError> { get_version(file) })
+        .collect()
 }
-
 
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
 /// Returns true/false if a `FactoryTalk` View file (APA or MER) is protected.
@@ -153,23 +166,33 @@ pub fn get_versions<P>(files: &[P]) -> Vec<Result<FileVersion, FtvFileError>>
 pub fn is_protected<P: AsRef<Path>>(path: &P) -> Result<bool, FtvFileError> {
     let mut file = cfb::open(path)?;
 
-    let mut prot_stream = file.open_stream("/FILE_PROTECTION")?;
+    if let Ok(mut prot_stream) = file.open_stream("/FILE_PROTECTION") {
+        // I'm not quite sure exactly what the contents of the file is if it is unprotected
+        // So far has always been 7 bytes, and the the second byte has always been a 3,
+        // and the rest have been 0. If it's password protected it's always been greater than
+        // 7 bytes. I assume it's some hashed form of the password.
+        // The exception here is if when an MER is exported with the "Never Convert" option selected
+        // the bytes pattern seems to always be: [00, 03, 00, 01, 00, 00, 00], pretty similar to the
+        // unlocked bytes, but with the 4th byte set to 1.
 
-    // I'm not quite sure exactly what the contents of the file is if it is unprotected
-    // So far has always been 7 bytes, and the the second byte has always been a 3,
-    // and the rest have been 0. If it's password protected it's always been greater than
-    // 7 bytes. I assume it's some hashed form of the password.
-    // The exception here is if when an MER is exported with the "Never Convert" option selected
-    // the bytes pattern seems to always be: [00, 03, 00, 01, 00, 00, 00], pretty similar to the
-    // unlocked bytes, but with the 4th byte set to 1.
-
-    Ok(if prot_stream.len() == 7 {
-        let mut buf: Vec<u8> = Vec::with_capacity(7);
-        prot_stream.read_to_end(&mut buf)?;
-        buf == [0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00]
+        Ok(if prot_stream.len() == 7 {
+            let mut buf: Vec<u8> = Vec::with_capacity(7);
+            prot_stream.read_to_end(&mut buf)?;
+            buf == [0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00]
+        } else {
+            prot_stream.len() > 7
+        })
+    } else if let Ok(mut prot_stream) = file.open_stream("/FTSPHasPwd") {
+        Ok(if prot_stream.len() >= 4 {
+            let mut buf: Vec<u8> = Vec::with_capacity(prot_stream.len() as usize);
+            prot_stream.read_to_end(&mut buf)?;
+            buf[0] != 0x00
+        } else {
+            false
+        })
     } else {
-        prot_stream.len() > 7
-    })
+        Err(FTypeError::NoProtFile.into())
+    }
 }
 
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
@@ -194,11 +217,14 @@ pub fn is_protected<P: AsRef<Path>>(path: &P) -> Result<bool, FtvFileError> {
 //this parrallel version is mainly for the python bindings to take advantage
 //or the parrallelization
 pub fn are_protected<P>(files: &[P]) -> Vec<Result<bool, FtvFileError>>
-    where P: AsRef<Path> + Sync
+where
+    P: AsRef<Path> + Sync,
 {
-    files.as_parallel_slice().par_iter().map(|file| -> Result<bool, FtvFileError> {
-        is_protected(file)
-    }).collect()
+    files
+        .as_parallel_slice()
+        .par_iter()
+        .map(|file| -> Result<bool, FtvFileError> { is_protected(file) })
+        .collect()
 }
 
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
@@ -240,7 +266,6 @@ pub fn strip_protection<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
     //then I need to modify the VERSION_INFORMATION to look like a newer version (I'll use v5.10)
     //no clue if this actually works on anything < v4 since I have nothing to test against
 
-
     let mut file = cfb::open_rw(&path)?;
 
     let version = get_version(&path)?;
@@ -255,13 +280,16 @@ pub fn strip_protection<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
 
         let mut ver_stream = file.open_stream("/VERSION_INFORMATION")?;
         ver_stream.write_all(&[0x03, 0x05, 0x0A])?;
-
     } else {
         //if version >= 5 use normal method just stip protection
         let mut stream = file.open_stream("/FILE_PROTECTION")?;
         stream.set_len(7)?;
         stream.write_all(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00])?;
     }
+
+    drop(file);
+
+    fix_crc(&path)?;
 
     Ok(())
 }
@@ -288,7 +316,8 @@ pub fn strip_protection<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
 //this parrallel version is mainly for the python bindings to take advantage
 //or the parrallelization
 pub fn strip_protections<P>(files: &[P]) -> Result<(), FtvFileError>
-    where P: AsRef<Path> + Sync
+where
+    P: AsRef<Path> + Sync,
 {
     // Note from what I recall of my earlier testing, removing the stream "/FILE_PROTECTION"
     // or setting it to a single byte of 0, or 7 bytes of 0, also removed the protection and
@@ -301,9 +330,47 @@ pub fn strip_protections<P>(files: &[P]) -> Result<(), FtvFileError>
     // MER Version 5 which doesn't give you a choice and is always "Never Convert", and it always seems
     // to work
 
-    files.as_parallel_slice().par_iter().map(|file| -> Result<(), FtvFileError> {
-        strip_protection(file)
-    }).collect()
+    files
+        .as_parallel_slice()
+        .par_iter()
+        .map(|file| -> Result<(), FtvFileError> { strip_protection(file) })
+        .collect()
+}
+
+/// Updates the CRC32 at the end of a `FactoryTalk` View
+/// MER or APA file, to ensure it restores properly after stripping the protection
+///
+/// # Arguments
+///
+/// * `path` - A path to the file to be checked
+///
+/// # Examples
+///
+/// ```
+/// use ab_versions::fix_crc;
+/// fix_crc(&path_to_file).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// Will return `Err`  if there is an error trying to access the file,
+// or the file is invalid.
+pub fn fix_crc<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
+    let mut file = File::options().read(true).write(true).open(path)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+
+    let mut hasher = Hasher::new();
+    hasher.update(&buffer[..buffer.len() - 4]);
+    let checksum = hasher.finalize();
+
+    file.write_at(&checksum.to_le_bytes(), buffer.len() as u64 - 4)?;
+    file.flush()?;
+    Ok(())
+}
+
+pub fn file_type(file: &CompoundFile<File>) -> MeFiletype {
+    todo!()
 }
 
 #[cfg(test)]
@@ -349,9 +416,9 @@ mod tests {
 
     fn process_archive<P: AsRef<std::path::Path>>(archive_path: P, state: &FileState) {
         use super::*;
+        use sevenz_rust::decompress_file;
         use tempfile::tempdir;
         use walkdir::WalkDir;
-        use sevenz_rust::decompress_file;
 
         let extract_dir = tempdir().expect(
             "Test failed due to inability to create a temporary directory to uncompress the files",
