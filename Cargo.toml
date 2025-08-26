@@ -1,20 +1,19 @@
 [package]
 name = "ab_versions"
-version = "0.9.1"
+version = "0.10.0"
 authors = ["Carl J. Geib"]
-edition = "2021"
+edition = "2024"
 
 
 [dependencies]
-cfb = "0.8"
-thiserror = "1.0.20"
-rayon = "1.7"
+cfb = "0.11"
+thiserror = "2.0.16"
+rayon = "1.11"
 crc32fast = "1.5.0"
 
 
-
 [dev-dependencies]
-sevenz-rust = "0.5"
-tempfile = "3.1.0"
+sevenz-rust = "0.6"
+tempfile = "3.21.0"
 walkdir = "2"
 nom = "7"

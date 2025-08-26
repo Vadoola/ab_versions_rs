@@ -8,7 +8,6 @@
 #![deny(clippy::pedantic)]
 
 use crc32fast::Hasher;
-use log::error;
 use rayon::prelude::*;
 use std::{
     fmt,
