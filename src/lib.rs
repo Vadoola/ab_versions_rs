@@ -7,14 +7,17 @@
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
 
-use cfb::CompoundFile;
 use crc32fast::Hasher;
+use log::error;
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::{Read, Write};
-use std::os::unix::fs::FileExt;
-use std::path::Path;
-use std::{fmt, fmt::Display};
+use std::{
+    fmt,
+    fmt::Display,
+    fs::File,
+    io::{Read, Write},
+    os::unix::fs::FileExt,
+    path::Path,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -25,6 +28,8 @@ pub enum FTypeError {
     InvalidVersion,
     #[error("No Password protection file was found")]
     NoProtFile,
+    #[error("The Password protection file appears to be invalid")]
+    ProtFileInvalid,
 }
 
 #[derive(Error, Debug)]
@@ -99,7 +104,7 @@ pub fn get_version<P: AsRef<Path>>(filename: &P) -> Result<FileVersion, FtvFileE
                         _ => err.into(),
                     }
                 })?;
-        let mut buffer = Vec::new();
+        let mut buffer = Vec::with_capacity(stream.len() as usize);
         stream.read_to_end(&mut buffer)?;
         buffer
     };
@@ -185,8 +190,8 @@ pub fn is_protected<P: AsRef<Path>>(path: &P) -> Result<bool, FtvFileError> {
         })
     } else if let Ok(mut prot_stream) = file.open_stream("/FTSPHasPwd") {
         Ok(if prot_stream.len() >= 4 {
-            let mut buf: Vec<u8> = Vec::with_capacity(prot_stream.len() as usize);
-            prot_stream.read_to_end(&mut buf)?;
+            let mut buf = [0u8; 1];
+            prot_stream.read_exact(&mut buf)?;
             buf[0] != 0x00
         } else {
             false
@@ -229,6 +234,102 @@ where
 }
 
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
+/// Strips the password protection or "Never Convert" setting of a `FactoryTalk` View
+/// MER file
+///
+/// # Arguments
+///
+/// * `path` - A path to the file to be checked
+///
+/// # Examples
+///
+/// ```
+/// use ab_versions::strip_prot_mer;
+/// strip_prot_mer(&path_to_file).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// Will return `Err`  if there is an error trying to access the file,
+// or the file is invalid.
+fn strip_prot_mer<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
+    // Note from what I recall of my earlier testing, removing the stream "/FILE_PROTECTION"
+    // or setting it to a single byte of 0, or 7 bytes of 0, also removed the protection and
+    // caused no problems that I could tell. To err on the side of caution, it seemed safer
+    //to leave the "/FILE_PROTECTION" stream in place and set it's byte to the 7 byte pattern
+    //that seems to be used for all unlocked files.
+
+    // Also of note if an MER is set to "Never Convert" stripping the protection this way will work
+    // and allows the MER to be restored. I've tested this on MERs from version 12 all the way down to
+    // MER Version 5 which doesn't give you a choice and is always "Never Convert", and it always seems
+    // to work
+
+    //Ok so I never had access to a file with version lower than 5, but my research told me that they didn't contain
+    //the info to be restored to a project file and even this method of stripping the "File Protection"
+    //wouldn't work. I finally got some v4 files (although I can't include them in the test suite)
+    //and they actually do seem to have the information to convert them, but the process is slightly different
+    //First I need to CREATE the FILE_PROTECTION stream, and set it to an unlocked value
+    //then I need to modify the VERSION_INFORMATION to look like a newer version (I'll use v5.10)
+    //no clue if this actually works on anything < v4 since I have nothing to test against
+
+    let version = get_version(&path)?;
+    let mut file = cfb::open_rw(&path)?;
+
+    if version.major_rev < 5 {
+        //if version < 5 use other method, to create FILE_PROTECTION
+        //and set the file_version to 5.10
+        //wonder if I should be checking for a .med stream to verify it's an MER here?
+        let mut fp_stream = file.create_new_stream("/FILE_PROTECTION")?;
+        fp_stream.set_len(7)?;
+        fp_stream.write_all(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00])?;
+
+        let mut ver_stream = file.open_stream("/VERSION_INFORMATION")?;
+        ver_stream.write_all(&[0x03, 0x05, 0x0A])?;
+    } else {
+        //if version >= 5 use normal method just strip protection
+        let mut stream = file.open_stream("/FILE_PROTECTION")?;
+        stream.set_len(7)?;
+        stream.write_all(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00])?;
+    }
+
+    drop(file);
+    fix_crc(&path)?;
+    Ok(())
+}
+
+// https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
+/// Strips the password protection or "Never Convert" setting of an `FactoryTalk` View
+/// APA file
+///
+/// # Arguments
+///
+/// * `path` - A path to the file to be checked
+///
+/// # Examples
+///
+/// ```
+/// use ab_versions::strip_prot_apa;
+/// strip_prot_apa(&path_to_file).unwrap();
+/// ```
+///
+/// # Errors
+///
+/// Will return `Err`  if there is an error trying to access the file,
+// or the file is invalid.
+fn strip_prot_apa<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
+    let mut file = cfb::open_rw(&path)?;
+    let mut fp_stream = file.open_stream("/FTSPHasPwd")?;
+
+    if fp_stream.len() < 4 {
+        Err(FTypeError::ProtFileInvalid.into())
+    } else {
+        let data = [0u8; 1];
+        fp_stream.write_all(&data)?;
+        Ok(())
+    }
+}
+
+// https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
 /// Strips the password protection or "Never Convert" setting of an `FactoryTalk` View
 /// MER or APA file
 ///
@@ -248,51 +349,11 @@ where
 /// Will return `Err`  if there is an error trying to access the file,
 // or the file is invalid.
 pub fn strip_protection<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
-    // Note from what I recall of my earlier testing, removing the stream "/FILE_PROTECTION"
-    // or setting it to a single byte of 0, or 7 bytes of 0, also removed the protection and
-    // caused no problems that I could tell. To err on the side of caution, it seemed safter
-    //to leave the "/FILE_PROTECTION" stream in place and set it's byte to the 7 byte pattern
-    //that seems to be used for all unlocked files.
-
-    // Also of note if an MER is set to "Never Convert" stripping the protection this way will work
-    // and allows the MER to be restored. I've tested this on MERs from version 12 all the way down to
-    // MER Version 5 which doesn't give you a choice and is always "Never Convert", and it always seems
-    // to work
-
-    //Ok so I never had access to a file with version lower than 5, but my research told me that they didn't contain
-    //the info to be restored to a project file and even this method of stripping the "File Protection"
-    //wouldn't work. I finally got some v4 files (although I can't include them in the test suite)
-    //and they actually do seem to have the information to convert them, but the process is slightly different
-    //First I need to CREATE the FILE_PROTECTION stream, and set it to an unlocked value
-    //then I need to modify the VERSION_INFORMATION to look like a newer version (I'll use v5.10)
-    //no clue if this actually works on anything < v4 since I have nothing to test against
-
-    let mut file = cfb::open_rw(&path)?;
-
-    let version = get_version(&path)?;
-
-    if version.major_rev < 5 {
-        //if version < 5 use other method, to create FILE_PROTECTION
-        //and set the file_version to 5.10
-        //wonder if I should be checking for a .med stream to verify it's an MER here?
-        let mut fp_stream = file.create_new_stream("/FILE_PROTECTION")?;
-        fp_stream.set_len(7)?;
-        fp_stream.write_all(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00])?;
-
-        let mut ver_stream = file.open_stream("/VERSION_INFORMATION")?;
-        ver_stream.write_all(&[0x03, 0x05, 0x0A])?;
-    } else {
-        //if version >= 5 use normal method just stip protection
-        let mut stream = file.open_stream("/FILE_PROTECTION")?;
-        stream.set_len(7)?;
-        stream.write_all(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00])?;
+    match file_type(&path) {
+        MeFiletype::Apa => strip_prot_apa(&path),
+        MeFiletype::Mer => strip_prot_mer(&path),
+        MeFiletype::Other => Err(FTypeError::InvalidVersion.into()),
     }
-
-    drop(file);
-
-    fix_crc(&path)?;
-
-    Ok(())
 }
 
 // https://rust-lang.github.io/rust-clippy/master/index.html#missing_errors_doc
@@ -339,7 +400,7 @@ where
 }
 
 /// Updates the CRC32 at the end of a `FactoryTalk` View
-/// MER or APA file, to ensure it restores properly after stripping the protection
+/// MER file, to ensure it restores properly after stripping the protection
 ///
 /// # Arguments
 ///
@@ -388,7 +449,6 @@ pub fn file_type<P: AsRef<Path>>(path: P) -> MeFiletype {
             };
         }
     }
-
     MeFiletype::Other
 }
 
