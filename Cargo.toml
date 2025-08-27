@@ -1,6 +1,6 @@
 [package]
 name = "ab_versions"
-version = "0.10.0"
+version = "0.10.1"
 authors = ["Carl J. Geib"]
 edition = "2024"
 

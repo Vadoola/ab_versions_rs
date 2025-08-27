@@ -14,10 +14,15 @@ use std::{
     fmt::Display,
     fs::File,
     io::{Read, Write},
-    os::unix::fs::FileExt,
     path::Path,
 };
 use thiserror::Error;
+
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
 #[derive(Error, Debug)]
 pub enum FTypeError {
@@ -425,7 +430,12 @@ pub fn fix_crc<P: AsRef<Path>>(path: P) -> Result<(), FtvFileError> {
     hasher.update(&buffer[..buffer.len() - 4]);
     let checksum = hasher.finalize();
 
+    #[cfg(unix)]
     file.write_at(&checksum.to_le_bytes(), buffer.len() as u64 - 4)?;
+
+    #[cfg(windows)]
+    file.seek_write(&checksum.to_le_bytes(), buffer.len() as u64 - 4)?;
+
     file.flush()?;
     Ok(())
 }
@@ -454,10 +464,10 @@ pub fn file_type<P: AsRef<Path>>(path: P) -> MeFiletype {
 #[cfg(test)]
 mod tests {
     use nom::{
+        IResult,
         bytes::complete::{tag, take_until},
         character::complete::digit1,
         combinator::map_res,
-        IResult,
     };
 
     use crate::strip_protection;
